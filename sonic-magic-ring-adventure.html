@@ -1,0 +1,1424 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sonic: Приключения в Волшебном Кольце</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Baloo+2:wght@500;700;800&family=Fredoka:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  * { margin:0; padding:0; box-sizing:border-box; }
+  html,body{
+    height:100%;
+    background: radial-gradient(circle at 50% 20%, #2b2560 0%, #14103a 55%, #0a0820 100%);
+    font-family:'Baloo 2', sans-serif;
+    display:flex; align-items:center; justify-content:center;
+    overflow:hidden;
+  }
+  #gameWrap{
+    position:relative;
+    width:960px; height:540px;
+    max-width:100vw; max-height:100vh;
+    border-radius:22px;
+    overflow:hidden;
+    box-shadow: 0 0 0 6px rgba(255,255,255,0.08), 0 20px 60px rgba(0,0,0,0.6), 0 0 90px rgba(120,90,255,0.35);
+  }
+  canvas{
+    display:block;
+    width:100%; height:100%;
+    background:#111;
+    cursor:pointer;
+    image-rendering:auto;
+  }
+  #hint{
+    position:absolute; bottom:6px; left:50%; transform:translateX(-50%);
+    color:rgba(255,255,255,0.55); font-size:12px; font-family:'Fredoka',sans-serif;
+    letter-spacing:0.5px; pointer-events:none;
+  }
+</style>
+</head>
+<body>
+<div id="gameWrap">
+  <canvas id="game" width="960" height="540"></canvas>
+</div>
+<div id="hint">← → двигаться · ПРОБЕЛ прыжок · ↓ кувырок</div>
+
+<script>
+(function(){
+"use strict";
+
+/* ============================================================
+   SONIC: ПРИКЛЮЧЕНИЯ В ВОЛШЕБНОМ КОЛЬЦЕ
+   Единая HTML5 Canvas игра с несколькими уровнями
+   ============================================================ */
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+// ---------- Общее состояние ----------
+let state = 'start'; // 'start' | 'playing' | 'complete'
+let currentLevelIndex = 0;
+let time = 0;
+let unlockedLevels = [true, true, true]; // все доступны сразу — детская игра, без наказаний
+
+const keys = {};
+window.addEventListener('keydown', e=>{
+  keys[e.code]=true;
+  if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+});
+window.addEventListener('keyup', e=> keys[e.code]=false);
+
+// ---------- Мышь / клики (кнопки на экранах) ----------
+let mouse = {x:0,y:0,clicked:false};
+canvas.addEventListener('mousemove', e=>{
+  const r = canvas.getBoundingClientRect();
+  mouse.x = (e.clientX-r.left) * (W/r.width);
+  mouse.y = (e.clientY-r.top) * (H/r.height);
+});
+canvas.addEventListener('click', e=>{
+  const r = canvas.getBoundingClientRect();
+  mouse.x = (e.clientX-r.left) * (W/r.width);
+  mouse.y = (e.clientY-r.top) * (H/r.height);
+  mouse.clicked = true;
+});
+
+function pointInRect(px,py,rc){
+  return px>=rc.x && px<=rc.x+rc.w && py>=rc.y && py<=rc.y+rc.h;
+}
+
+// ============================================================
+// ЧАСТИЦЫ (общие для всех уровней)
+// ============================================================
+let particles = [];
+function spawnParticle(p){ particles.push(p); }
+function updateParticles(dt){
+  for(let i=particles.length-1;i>=0;i--){
+    const p = particles[i];
+    p.x += p.vx; p.y += p.vy; p.life -= dt;
+    if(p.grav) p.vy += 0.05;
+    if(p.life<=0) particles.splice(i,1);
+  }
+}
+function drawParticles(camX){
+  for(const p of particles){
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, p.life/p.maxLife);
+    ctx.fillStyle = p.color;
+    ctx.beginPath();
+    ctx.arc(p.x-camX, p.y, p.r, 0, Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ============================================================
+// ИГРОК: SONIC
+// ============================================================
+const player = {
+  x:0,y:0,w:34,h:40,vx:0,vy:0,
+  onGround:false, facing:1, rolling:false,
+  checkpointX:0, checkpointY:0,
+  rings:0, animT:0
+};
+
+function resetPlayer(lv){
+  player.x = lv.startX; player.y = lv.startY;
+  player.vx=0; player.vy=0; player.onGround=false; player.facing=1; player.rolling=false;
+  player.checkpointX = lv.startX; player.checkpointY = lv.startY;
+  player.rings = 0; player.animT=0;
+}
+
+function drawSonic(px, py, w, h, facing, rolling, animT, onGround, vx){
+  ctx.save();
+  ctx.translate(px+w/2, py+h/2);
+  ctx.scale(facing,1);
+
+  if(rolling){
+    ctx.rotate(animT*0.9);
+    // свернувшийся клубок
+    const r = w*0.62;
+    let grd = ctx.createRadialGradient(-r*0.3,-r*0.3,2,0,0,r);
+    grd.addColorStop(0,'#5fb8ff'); grd.addColorStop(1,'#1b4fd6');
+    ctx.fillStyle = grd;
+    ctx.beginPath(); ctx.arc(0,0,r,0,Math.PI*2); ctx.fill();
+    for(let i=0;i<8;i++){
+      const a = (i/8)*Math.PI*2;
+      ctx.beginPath();
+      ctx.moveTo(Math.cos(a)*r*0.7, Math.sin(a)*r*0.7);
+      ctx.lineTo(Math.cos(a+0.25)*r*1.25, Math.sin(a+0.25)*r*1.25);
+      ctx.lineTo(Math.cos(a-0.25)*r*0.55, Math.sin(a-0.25)*r*0.55);
+      ctx.closePath();
+      ctx.fillStyle = '#123a9c';
+      ctx.fill();
+    }
+    ctx.restore();
+    return;
+  }
+
+  const bob = onGround ? Math.sin(animT*0.6)*2*Math.min(1,Math.abs(vx)/4) : 0;
+  ctx.translate(0,bob);
+
+  // тень иголок (задние 3 шипа)
+  ctx.fillStyle = '#1b4fd6';
+  for(let i=0;i<3;i++){
+    ctx.save();
+    ctx.rotate(-0.55 + i*0.18);
+    ctx.beginPath();
+    ctx.moveTo(-w*0.05, -h*0.15);
+    ctx.quadraticCurveTo(-w*0.85, -h*0.05 - i*4, -w*0.95 - i*3, h*0.12 - i*2);
+    ctx.quadraticCurveTo(-w*0.5, h*0.05, -w*0.05, h*0.05);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // тело (градиент синий)
+  let bodyGrd = ctx.createRadialGradient(-w*0.15,-h*0.25,4,0,0,w*0.75);
+  bodyGrd.addColorStop(0,'#6fc3ff');
+  bodyGrd.addColorStop(0.55,'#2f7bf6');
+  bodyGrd.addColorStop(1,'#1450d6');
+  ctx.fillStyle = bodyGrd;
+  ctx.beginPath();
+  ctx.ellipse(0, -h*0.05, w*0.42, h*0.42, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // живот кремовый
+  ctx.fillStyle = '#ffe9c2';
+  ctx.beginPath();
+  ctx.ellipse(w*0.06, h*0.08, w*0.22, h*0.24, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // голова
+  ctx.fillStyle = bodyGrd;
+  ctx.beginPath();
+  ctx.ellipse(w*0.18, -h*0.28, w*0.30, h*0.28, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // мордочка кремовая
+  ctx.fillStyle = '#ffe9c2';
+  ctx.beginPath();
+  ctx.ellipse(w*0.32, -h*0.18, w*0.16, h*0.13, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // глаз (большой, выразительный)
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.ellipse(w*0.28,-h*0.34,w*0.15,h*0.15,0,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#0c8f3f';
+  ctx.beginPath(); ctx.arc(w*0.33,-h*0.32,w*0.075,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = '#0a2a12';
+  ctx.beginPath(); ctx.arc(w*0.35,-h*0.33,w*0.032,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,0.9)';
+  ctx.beginPath(); ctx.arc(w*0.30,-h*0.37,w*0.025,0,Math.PI*2); ctx.fill();
+
+  // нос
+  ctx.fillStyle = '#123a1a';
+  ctx.beginPath(); ctx.arc(w*0.44,-h*0.17,w*0.045,0,Math.PI*2); ctx.fill();
+
+  // ухо
+  ctx.fillStyle = bodyGrd;
+  ctx.beginPath();
+  ctx.moveTo(w*0.06,-h*0.5);
+  ctx.quadraticCurveTo(w*0.02,-h*0.72, w*0.16,-h*0.68);
+  ctx.quadraticCurveTo(w*0.14,-h*0.5, w*0.06,-h*0.5);
+  ctx.fill();
+
+  // руки/перчатки
+  const armSwing = onGround ? Math.sin(animT*0.6+Math.PI)*8*Math.min(1,Math.abs(vx)/4) : 0;
+  ctx.fillStyle = '#ffffff';
+  ctx.beginPath(); ctx.arc(-w*0.18, h*0.12+armSwing*0.2, w*0.14, 0, Math.PI*2); ctx.fill();
+  ctx.strokeStyle='rgba(0,0,0,0.08)'; ctx.lineWidth=1; ctx.stroke();
+
+  // ноги / кроссовки (красные)
+  const legSwing = onGround ? Math.sin(animT*0.6)*10*Math.min(1,Math.abs(vx)/4) : 0;
+  drawShoe(-w*0.12+legSwing*0.3, h*0.36);
+  drawShoe(w*0.10-legSwing*0.3, h*0.4);
+
+  function drawShoe(sx,sy){
+    ctx.fillStyle = '#e8261f';
+    roundRect(sx-w*0.15, sy-h*0.08, w*0.32, h*0.2, 7);
+    ctx.fill();
+    ctx.fillStyle = '#ffffff';
+    roundRect(sx-w*0.15, sy+h*0.02, w*0.32, h*0.06, 4);
+    ctx.fill();
+    ctx.fillStyle = '#ffd23f';
+    ctx.beginPath(); ctx.arc(sx, sy-h*0.02, w*0.045,0,Math.PI*2); ctx.fill();
+  }
+  function roundRect(x,y,w2,h2,r){
+    ctx.beginPath();
+    ctx.moveTo(x+r,y);
+    ctx.arcTo(x+w2,y,x+w2,y+h2,r);
+    ctx.arcTo(x+w2,y+h2,x,y+h2,r);
+    ctx.arcTo(x,y+h2,x,y,r);
+    ctx.arcTo(x,y,x+w2,y,r);
+    ctx.closePath();
+  }
+
+  ctx.restore();
+}
+
+// ============================================================
+// КОЛЬЦА
+// ============================================================
+function drawRing(x,y,camX,t,collected){
+  if(collected) return;
+  const sx = x-camX;
+  const squish = Math.abs(Math.sin(t*0.05 + x*0.01));
+  ctx.save();
+  ctx.translate(sx,y);
+  ctx.scale(0.35+squish*0.65,1);
+  ctx.shadowColor = '#ffe066';
+  ctx.shadowBlur = 14;
+  ctx.strokeStyle = '#ffd23f';
+  ctx.lineWidth = 6;
+  ctx.beginPath(); ctx.arc(0,0,13,0,Math.PI*2); ctx.stroke();
+  ctx.strokeStyle = '#fff6d0';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.arc(0,0,13,0,Math.PI*2); ctx.stroke();
+  ctx.restore();
+}
+
+// ============================================================
+// УРОВНИ
+// ============================================================
+const levels = [];
+
+// ---------- helper: ground heightmap for level 1 ----------
+function hillsHeight(x){
+  return 400
+    + Math.sin(x*0.004)*55
+    + Math.sin(x*0.011+1.3)*22
+    + Math.sin(x*0.002+0.4)*30;
+}
+
+// ---------------------------------------------------------
+// LEVEL 1 — ЗЕЛЁНЫЕ ХОЛМЫ
+// ---------------------------------------------------------
+levels.push({
+  name:'Зелёные Холмы',
+  subtitle:'Солнечный луг',
+  type:'hills',
+  width:3400,
+  startX:60, startY:300,
+  goalX:3280,
+  themeColor:'#2fae4e',
+  cardBg: ['#7fe36a','#2fae4e'],
+  groundFn: hillsHeight,
+  platforms:[
+    {x:520,y:300,w:120,h:22,type:'leaf'},
+    {x:760,y:250,w:110,h:22,type:'leaf'},
+    {x:1120,y:320,w:130,h:22,type:'leaf'},
+    {x:1500,y:260,w:120,h:22,type:'leaf'},
+    {x:1900,y:230,w:130,h:22,type:'crystal'},
+    {x:2260,y:300,w:120,h:22,type:'leaf'},
+    {x:2650,y:250,w:130,h:22,type:'leaf'},
+    {x:3020,y:280,w:120,h:22,type:'leaf'},
+  ],
+  rings: genRingLine([
+    [200,340],[260,320],[320,300],[560,260],[600,240],[640,220],
+    [800,210],[840,195],[1150,280],[1190,260],[1230,240],
+    [1540,220],[1580,205],[1940,190],[1980,175],[2020,190],
+    [2300,260],[2340,240],[2690,210],[2730,195],[3060,240],[3100,220],[3200,260]
+  ]),
+  decorations:[
+    {type:'flower',x:180,y:0,scale:1.3,hue:'pink'},
+    {type:'flower',x:900,y:0,scale:1.6,hue:'purple'},
+    {type:'flower',x:1700,y:0,scale:1.2,hue:'pink'},
+    {type:'flower',x:2450,y:0,scale:1.5,hue:'yellow'},
+    {type:'flower',x:3150,y:0,scale:1.3,hue:'purple'},
+    {type:'tree',x:420,y:0,scale:1},
+    {type:'tree',x:1300,y:0,scale:1.2},
+    {type:'tree',x:2050,y:0,scale:0.9},
+    {type:'tree',x:2900,y:0,scale:1.1},
+  ],
+  drawBackground(camX){
+    // небо
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#5cc9ff');
+    g.addColorStop(0.55,'#a9e8ff');
+    g.addColorStop(1,'#e7fff0');
+    ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+
+    // солнце
+    const sunX = 780 - camX*0.05;
+    ctx.save();
+    ctx.shadowColor='#fff6c8'; ctx.shadowBlur=60;
+    ctx.fillStyle='#fff3b0';
+    ctx.beginPath(); ctx.arc(sunX,90,55,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+
+    // облака (параллакс)
+    for(let i=0;i<7;i++){
+      const bx = (i*430 - camX*0.22) % (W+400) - 200;
+      drawCloud(bx, 70+((i*57)%90), 1+((i%3)*0.25), 'rgba(255,255,255,0.9)');
+    }
+    // дальние холмы (параллакс)
+    ctx.fillStyle = '#bdeea0';
+    ctx.beginPath();
+    ctx.moveTo(0,H);
+    for(let x=0;x<=W;x+=40){
+      const wx = x + camX*0.4;
+      ctx.lineTo(x, 430 + Math.sin(wx*0.006)*30);
+    }
+    ctx.lineTo(W,H); ctx.closePath(); ctx.fill();
+  },
+  drawForeDecor(camX,d){
+    if(d.type==='tree') drawTree(d.x-camX*1, hillsHeight(d.x), d.scale);
+    if(d.type==='flower') drawBigFlower(d.x-camX*1, hillsHeight(d.x), d.scale, d.hue);
+  },
+  drawGround(camX){
+    ctx.beginPath();
+    ctx.moveTo(-10,H+10);
+    for(let x=-10;x<=W+10;x+=16){
+      ctx.lineTo(x, hillsHeight(x+camX));
+    }
+    ctx.lineTo(W+10,H+10); ctx.closePath();
+    const g = ctx.createLinearGradient(0,340,0,540);
+    g.addColorStop(0,'#5fce53');
+    g.addColorStop(0.15,'#3fae3f');
+    g.addColorStop(1,'#2a7a35');
+    ctx.fillStyle = g; ctx.fill();
+    // трава-полоска сверху
+    ctx.strokeStyle='#7ee85e'; ctx.lineWidth=6;
+    ctx.beginPath();
+    for(let x=-10;x<=W+10;x+=16){
+      const gy = hillsHeight(x+camX);
+      if(x===-10) ctx.moveTo(x,gy); else ctx.lineTo(x,gy);
+    }
+    ctx.stroke();
+    // травинки
+    ctx.strokeStyle='#3fae3f'; ctx.lineWidth=2;
+    for(let x=-10;x<=W+10;x+=22){
+      const gy = hillsHeight(x+camX);
+      ctx.beginPath();
+      ctx.moveTo(x,gy);
+      ctx.lineTo(x-4,gy-10);
+      ctx.moveTo(x,gy);
+      ctx.lineTo(x+4,gy-9);
+      ctx.stroke();
+    }
+  },
+  ambient(dt){
+    if(Math.random()<0.15){
+      spawnParticle({x: Math.random()*3400, y: Math.random()*200,
+        vx:-0.3, vy:0.4, r:2+Math.random()*2, life:200, maxLife:200,
+        color:'rgba(255,240,160,0.8)'});
+    }
+  }
+});
+
+// ---------------------------------------------------------
+// LEVEL 2 — КРИСТАЛЬНЫЙ ЛЕС
+// ---------------------------------------------------------
+levels.push({
+  name:'Кристальный Лес',
+  subtitle:'Мистические кристаллы',
+  type:'floating',
+  width:3600,
+  startX:60, startY:380,
+  goalX:3500,
+  themeColor:'#8b5cf6',
+  cardBg:['#a78bfa','#4c1d95'],
+  voidLevel: true,
+  platforms:[
+    {x:0,y:440,w:260,h:40,type:'crystalGround'},
+    {x:280,y:410,w:150,h:28,type:'crystal'},
+    {x:470,y:370,w:145,h:28,type:'crystal'},
+    {x:660,y:410,w:150,h:28,type:'crystal'},
+    {x:850,y:365,w:145,h:28,type:'crystal'},
+    {x:1040,y:405,w:150,h:28,type:'crystal'},
+    {x:1230,y:355,w:145,h:28,type:'crystal'},
+    {x:1420,y:400,w:150,h:28,type:'crystal'},
+    {x:1610,y:350,w:145,h:28,type:'crystal'},
+    {x:1800,y:300,w:150,h:28,type:'crystal'},
+    {x:1990,y:355,w:145,h:28,type:'crystal'},
+    {x:2180,y:405,w:150,h:28,type:'crystal'},
+    {x:2370,y:355,w:145,h:28,type:'crystal'},
+    {x:2560,y:305,w:150,h:28,type:'crystal'},
+    {x:2750,y:360,w:145,h:28,type:'crystal'},
+    {x:2940,y:405,w:150,h:28,type:'crystal'},
+    {x:3130,y:350,w:160,h:28,type:'crystal'},
+    {x:3320,y:340,w:280,h:40,type:'crystalGround'},
+  ],
+  rings: genRingLine([
+    [355,370],[540,330],[735,370],[925,325],[1115,365],[1305,315],
+    [1495,360],[1685,310],[1875,260],[2065,315],[2255,365],[2445,315],
+    [2635,265],[2825,320],[3015,365],[3210,310],[3400,300]
+  ]),
+  decorations:[
+    {type:'bigCrystal',x:150,y:440,scale:1.4,hue:'#a78bfa'},
+    {type:'bigCrystal',x:1000,y:440,scale:1.1,hue:'#60a5fa'},
+    {type:'bigCrystal',x:2000,y:440,scale:1.6,hue:'#e879f9'},
+    {type:'bigCrystal',x:2950,y:440,scale:1.2,hue:'#a78bfa'},
+  ],
+  drawBackground(camX){
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#1a1035');
+    g.addColorStop(0.5,'#2b1856');
+    g.addColorStop(1,'#160a2e');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+
+    // далёкие светящиеся кристаллы-силуэты
+    for(let i=0;i<10;i++){
+      const bx = (i*380 - camX*0.15) % (W+400) - 200;
+      const by = 380 + Math.sin(i*1.7)*40;
+      ctx.save();
+      ctx.globalAlpha=0.25;
+      ctx.fillStyle = i%2? '#8b5cf6':'#60a5fa';
+      drawCrystalShape(bx,by,40+((i%3)*14));
+      ctx.restore();
+    }
+    // звёзды/пыльца
+    for(let i=0;i<40;i++){
+      const sx = (i*97 - camX*0.35) % (W+200);
+      const sy = (i*53)%(H*0.6);
+      ctx.fillStyle='rgba(255,255,255,'+(0.15+0.35*Math.sin(i+time*0.05)*0.5+0.35)+')';
+      ctx.beginPath(); ctx.arc(sx,sy,1.6,0,Math.PI*2); ctx.fill();
+    }
+    // мягкий светящийся туман внизу — падение не выглядит как бездна
+    const fogG = ctx.createLinearGradient(0,H-140,0,H);
+    fogG.addColorStop(0,'rgba(139,92,246,0)');
+    fogG.addColorStop(1,'rgba(167,139,250,0.35)');
+    ctx.fillStyle = fogG;
+    ctx.fillRect(0,H-140,W,140);
+  },
+  drawForeDecor(camX,d){
+    if(d.type==='bigCrystal'){
+      ctx.save();
+      ctx.translate(d.x-camX, d.y);
+      ctx.scale(d.scale,d.scale);
+      ctx.shadowColor = d.hue; ctx.shadowBlur=30;
+      drawCrystalShape(0,0,55,d.hue);
+      ctx.restore();
+    }
+  },
+  drawGround(camX){ /* пропасть — пола нет, есть только платформы (рисуются отдельно) */ },
+  ambient(dt){
+    if(Math.random()<0.2){
+      spawnParticle({x: Math.random()*3600, y: 100+Math.random()*350,
+        vx:(Math.random()-0.5)*0.4, vy:-0.2-Math.random()*0.3, r:1.5+Math.random()*2,
+        life:160, maxLife:160, color:'rgba(190,150,255,0.85)'});
+    }
+  }
+});
+
+// ---------------------------------------------------------
+// LEVEL 3 — ОБЛАЧНЫЙ ОСТРОВ
+// ---------------------------------------------------------
+levels.push({
+  name:'Облачный Остров',
+  subtitle:'Закатные небеса',
+  type:'floating',
+  width:3400,
+  startX:60, startY:380,
+  goalX:3300,
+  themeColor:'#fb923c',
+  cardBg:['#fda4af','#fb923c'],
+  voidLevel:true,
+  bobbing:true,
+  platforms:[
+    {x:0,y:440,w:240,h:50,type:'cloudGround'},
+    {x:300,y:400,w:130,h:34,type:'cloud'},
+    {x:500,y:350,w:120,h:34,type:'cloud'},
+    {x:700,y:400,w:140,h:34,type:'cloud'},
+    {x:930,y:330,w:120,h:34,type:'cloud'},
+    {x:1140,y:390,w:130,h:34,type:'cloud'},
+    {x:1360,y:320,w:120,h:34,type:'cloud'},
+    {x:1580,y:380,w:140,h:34,type:'cloud'},
+    {x:1820,y:300,w:130,h:34,type:'cloud'},
+    {x:2040,y:370,w:120,h:34,type:'cloud'},
+    {x:2260,y:310,w:140,h:34,type:'cloud'},
+    {x:2500,y:390,w:130,h:34,type:'cloud'},
+    {x:2720,y:330,w:120,h:34,type:'cloud'},
+    {x:2940,y:400,w:140,h:34,type:'cloud'},
+    {x:3160,y:340,w:240,h:50,type:'cloudGround'},
+  ],
+  rings: genRingLine([
+    [340,360],[540,310],[740,360],[970,290],[1180,350],[1400,280],
+    [1620,340],[1860,260],[2080,330],[2300,270],[2540,350],[2760,290],
+    [2980,360],[3200,300]
+  ]),
+  decorations:[
+    {type:'softCloud',x:150,y:150,scale:1.4},
+    {type:'softCloud',x:900,y:110,scale:1.1},
+    {type:'softCloud',x:1750,y:160,scale:1.6},
+    {type:'softCloud',x:2600,y:120,scale:1.2},
+    {type:'rainbow',x:1400,y:0,scale:1},
+  ],
+  drawBackground(camX){
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#6a5acd');
+    g.addColorStop(0.35,'#ff8fab');
+    g.addColorStop(0.65,'#ffb56b');
+    g.addColorStop(1,'#ffd9a0');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+
+    // солнце заката
+    const sunX = 480 - camX*0.05;
+    ctx.save();
+    ctx.shadowColor='#fff0c2'; ctx.shadowBlur=70;
+    ctx.fillStyle='#fff3cf';
+    ctx.beginPath(); ctx.arc(sunX,340,70,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+
+    for(let i=0;i<8;i++){
+      const bx = (i*400 - camX*0.18) % (W+400) - 200;
+      drawCloud(bx, 60+((i*47)%160), 1.2+((i%3)*0.3), 'rgba(255,255,255,0.55)');
+    }
+  },
+  drawForeDecor(camX,d){
+    if(d.type==='softCloud') drawCloud(d.x-camX*1.05, d.y, d.scale, 'rgba(255,255,255,0.9)');
+    if(d.type==='rainbow') drawRainbow(d.x-camX, 520);
+  },
+  drawGround(camX){},
+  ambient(dt){
+    if(Math.random()<0.15){
+      spawnParticle({x: Math.random()*3400, y: 450+Math.random()*40,
+        vx:0, vy:-0.5-Math.random()*0.4, r:1+Math.random()*1.5,
+        life:120, maxLife:120, color:'rgba(255,255,255,0.7)'});
+    }
+  }
+});
+
+// ---------------------------------------------------------
+// LEVEL 4 — ХРУСТАЛЬНЫЙ ЗАМОК (финальный уровень)
+// ---------------------------------------------------------
+function castleHeight(x){
+  const macro = 400 + Math.sin(x*0.0009)*70 + Math.sin(x*0.0031+2)*25;
+  return Math.round(macro/18)*18; // ступенчатый пол дворца
+}
+
+levels.push({
+  name:'Хрустальный Замок',
+  subtitle:'Ночь, звёзды и золото',
+  type:'hills',
+  width:3600,
+  startX:60, startY:350,
+  goalX:3500,
+  themeColor:'#93c5fd',
+  cardBg:['#c7d2fe','#312e81'],
+  groundFn: castleHeight,
+  platforms:[
+    {x:480,y:300,w:120,h:24,type:'crystal'},
+    {x:760,y:340,w:130,h:26,type:'chandelier'},
+    {x:1080,y:280,w:120,h:24,type:'crystal'},
+    {x:1400,y:330,w:130,h:26,type:'chandelier'},
+    {x:1750,y:260,w:130,h:24,type:'crystal'},
+    {x:2080,y:320,w:130,h:26,type:'chandelier'},
+    {x:2420,y:270,w:120,h:24,type:'crystal'},
+    {x:2750,y:330,w:130,h:26,type:'chandelier'},
+    {x:3080,y:280,w:130,h:24,type:'crystal'},
+  ],
+  rings: genRingLine([
+    [200,380],[260,370],[320,360],
+    [520,270],[560,255],[600,240],
+    [800,300],[840,285],
+    [1120,250],[1160,235],[1200,220],
+    [1440,290],[1480,275],
+    [1790,230],[1830,215],[1870,200],
+    [2120,280],[2160,265],
+    [2460,240],[2500,225],[2540,210],
+    [2790,290],[2830,275],
+    [3120,250],[3160,235],[3300,300],[3400,320]
+  ]),
+  decorations:[
+    {type:'tower',x:150,scale:1.3,hue:'#dbeafe'},
+    {type:'tower',x:930,scale:1.6,hue:'#e0e7ff'},
+    {type:'tower',x:1830,scale:1.2,hue:'#dbeafe'},
+    {type:'tower',x:2630,scale:1.5,hue:'#e0e7ff'},
+    {type:'tower',x:3400,scale:1.9,hue:'#fef9c3'},
+    {type:'window',x:520,y:190,scale:1,hue:'#60a5fa'},
+    {type:'window',x:1320,y:170,scale:1.2,hue:'#f472b6'},
+    {type:'window',x:2140,y:190,scale:1,hue:'#34d399'},
+    {type:'window',x:2940,y:160,scale:1.3,hue:'#fbbf24'},
+    {type:'banner',x:170,hue:'#dc2626'},
+    {type:'banner',x:945,hue:'#2563eb'},
+    {type:'banner',x:1845,hue:'#7c3aed'},
+    {type:'banner',x:2645,hue:'#dc2626'},
+    {type:'banner',x:3415,hue:'#eab308'},
+  ],
+  drawBackground(camX){
+    // ночное небо
+    const g = ctx.createLinearGradient(0,0,0,H);
+    g.addColorStop(0,'#0b0d2e');
+    g.addColorStop(0.5,'#1b1f4d');
+    g.addColorStop(1,'#33306e');
+    ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+
+    // звёзды
+    for(let i=0;i<55;i++){
+      const sx=(i*83 - camX*0.15)%(W+200);
+      const sy=(i*41)%(H*0.55);
+      ctx.fillStyle='rgba(255,255,255,'+(0.25+0.4*Math.abs(Math.sin(i+time*0.03)))+')';
+      ctx.beginPath(); ctx.arc(sx,sy,1.5,0,Math.PI*2); ctx.fill();
+    }
+
+    // луна
+    const moonX = 760 - camX*0.05;
+    ctx.save();
+    ctx.shadowColor='#e0e7ff'; ctx.shadowBlur=50;
+    ctx.fillStyle='#f4f6ff';
+    ctx.beginPath(); ctx.arc(moonX,90,50,0,Math.PI*2); ctx.fill();
+    ctx.fillStyle='rgba(200,210,255,0.35)';
+    ctx.beginPath(); ctx.arc(moonX-14,78,10,0,Math.PI*2); ctx.fill();
+    ctx.beginPath(); ctx.arc(moonX+16,102,7,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+
+    // северное сияние — волнистые ленты
+    for(let i=0;i<3;i++){
+      ctx.save();
+      ctx.globalAlpha = 0.18;
+      const grd = ctx.createLinearGradient(0,0,0,260);
+      grd.addColorStop(0, i===0?'#34d399': i===1?'#818cf8':'#f472b6');
+      grd.addColorStop(1,'rgba(0,0,0,0)');
+      ctx.fillStyle = grd;
+      ctx.beginPath();
+      ctx.moveTo(0,0);
+      for(let x=0;x<=W;x+=30){
+        const wx = x + camX*0.1;
+        ctx.lineTo(x, 30+i*30+Math.sin(wx*0.01+i*2+time*0.01)*40);
+      }
+      ctx.lineTo(W,0); ctx.closePath(); ctx.fill();
+      ctx.restore();
+    }
+
+    // дальний силуэт замковых стен (параллакс)
+    ctx.fillStyle='rgba(20,20,60,0.55)';
+    ctx.beginPath();
+    ctx.moveTo(0,H);
+    for(let x=0;x<=W;x+=40){
+      const wx = x + camX*0.35;
+      ctx.lineTo(x, 460 + Math.sin(wx*0.01)*14);
+    }
+    ctx.lineTo(W,H); ctx.closePath(); ctx.fill();
+  },
+  drawForeDecor(camX,d){
+    if(d.type==='tower') drawCastleTower(d.x-camX, castleHeight(d.x), d.scale, d.hue);
+    if(d.type==='window') drawStainedWindow(d.x-camX, d.y, d.scale, d.hue);
+    if(d.type==='banner') drawBanner(d.x-camX, castleHeight(d.x)-140, d.hue);
+  },
+  drawGround(camX){
+    ctx.beginPath();
+    ctx.moveTo(-10,H+10);
+    for(let x=-10;x<=W+10;x+=8){
+      ctx.lineTo(x, castleHeight(x+camX));
+    }
+    ctx.lineTo(W+10,H+10); ctx.closePath();
+    const g = ctx.createLinearGradient(0,280,0,540);
+    g.addColorStop(0,'#eef2ff');
+    g.addColorStop(0.12,'#c7d2fe');
+    g.addColorStop(1,'#4338ca');
+    ctx.fillStyle = g; ctx.fill();
+    // золотая кромка сверху
+    ctx.strokeStyle='#fbbf24'; ctx.lineWidth=4;
+    ctx.beginPath();
+    for(let x=-10;x<=W+10;x+=8){
+      const gy = castleHeight(x+camX);
+      if(x===-10) ctx.moveTo(x,gy); else ctx.lineTo(x,gy);
+    }
+    ctx.stroke();
+    // плиточные швы пола
+    ctx.strokeStyle='rgba(255,255,255,0.35)'; ctx.lineWidth=1;
+    for(let x=-10;x<=W+10;x+=46){
+      const gy = castleHeight(x+camX);
+      ctx.beginPath(); ctx.moveTo(x,gy+4); ctx.lineTo(x,gy+40); ctx.stroke();
+    }
+  },
+  ambient(dt){
+    if(Math.random()<0.18){
+      spawnParticle({x: Math.random()*3600, y: -10,
+        vx:-0.15, vy:0.6+Math.random()*0.4, r:1.5+Math.random()*2, life:260, maxLife:260,
+        color:'rgba(220,230,255,0.9)'});
+    }
+  }
+});
+
+// ---------- декор замка ----------
+function drawCastleTower(x,groundY,scale,hue){
+  ctx.save();
+  ctx.translate(x,groundY); ctx.scale(scale,scale);
+  // тело башни
+  const grd = ctx.createLinearGradient(-30,0,30,0);
+  grd.addColorStop(0, hue); grd.addColorStop(1,'#a5b4fc');
+  ctx.fillStyle = grd;
+  ctx.fillRect(-30,-190,60,190);
+  // окно башни
+  ctx.fillStyle='rgba(96,165,250,0.6)';
+  ctx.beginPath(); ctx.arc(0,-140,10,0,Math.PI*2); ctx.fill();
+  ctx.fillRect(-9,-140,18,26);
+  // зубцы
+  ctx.fillStyle = hue;
+  for(let i=-2;i<=2;i++){
+    ctx.fillRect(i*13-5,-198,10,14);
+  }
+  // золотой шпиль
+  ctx.fillStyle='#fbbf24';
+  ctx.shadowColor='#fde68a'; ctx.shadowBlur=18;
+  ctx.beginPath();
+  ctx.moveTo(-24,-198); ctx.lineTo(0,-260); ctx.lineTo(24,-198);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+function drawStainedWindow(x,y,scale,hue){
+  ctx.save();
+  ctx.translate(x,y); ctx.scale(scale,scale);
+  ctx.shadowColor=hue; ctx.shadowBlur=24;
+  // готическая арка
+  ctx.fillStyle='rgba(20,20,50,0.5)';
+  ctx.beginPath();
+  ctx.moveTo(-20,60); ctx.lineTo(-20,0);
+  ctx.arc(0,0,20,Math.PI,0);
+  ctx.lineTo(20,60); ctx.closePath(); ctx.fill();
+  const grd = ctx.createLinearGradient(0,-20,0,60);
+  grd.addColorStop(0,hue); grd.addColorStop(1,'rgba(255,255,255,0.3)');
+  ctx.fillStyle=grd;
+  ctx.beginPath();
+  ctx.moveTo(-15,58); ctx.lineTo(-15,2);
+  ctx.arc(0,2,15,Math.PI,0);
+  ctx.lineTo(15,58); ctx.closePath(); ctx.fill();
+  ctx.strokeStyle='rgba(255,255,255,0.6)'; ctx.lineWidth=2;
+  ctx.beginPath(); ctx.moveTo(0,-13); ctx.lineTo(0,58); ctx.moveTo(-15,25); ctx.lineTo(15,25); ctx.stroke();
+  // мягкий световой луч вниз
+  ctx.globalAlpha=0.12;
+  ctx.fillStyle=hue;
+  ctx.beginPath();
+  ctx.moveTo(-15,58); ctx.lineTo(15,58); ctx.lineTo(60,320); ctx.lineTo(-60,320);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+function drawBanner(x,y,hue){
+  const sway = Math.sin(time*0.03 + x*0.01)*6;
+  ctx.save();
+  ctx.translate(x,y);
+  ctx.strokeStyle='#cbb26a'; ctx.lineWidth=3;
+  ctx.beginPath(); ctx.moveTo(0,0); ctx.lineTo(0,26); ctx.stroke();
+  ctx.fillStyle=hue;
+  ctx.beginPath();
+  ctx.moveTo(-16+sway*0.2,10);
+  ctx.lineTo(16+sway,10);
+  ctx.lineTo(sway*1.4,70);
+  ctx.closePath(); ctx.fill();
+  ctx.fillStyle='rgba(255,255,255,0.5)';
+  ctx.beginPath(); ctx.arc(sway*0.6,32,5,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+
+function genRingLine(pts){
+  return pts.map(p=>({x:p[0], y:p[1], collected:false}));
+}
+
+// ---------- декоративные функции ----------
+function drawCloud(x,y,scale,color){
+  ctx.save();
+  ctx.translate(x,y); ctx.scale(scale,scale);
+  ctx.fillStyle=color;
+  ctx.beginPath();
+  ctx.arc(0,0,22,0,Math.PI*2);
+  ctx.arc(24,-10,26,0,Math.PI*2);
+  ctx.arc(50,0,20,0,Math.PI*2);
+  ctx.arc(24,12,24,0,Math.PI*2);
+  ctx.fill();
+  ctx.restore();
+}
+function drawTree(x,y,scale){
+  ctx.save();
+  ctx.translate(x,y); ctx.scale(scale,scale);
+  ctx.fillStyle='#8a5a34';
+  ctx.fillRect(-8,-20,16,60);
+  const g = ctx.createRadialGradient(-15,-70,5,0,-60,60);
+  g.addColorStop(0,'#8de86a'); g.addColorStop(1,'#3f9e3f');
+  ctx.fillStyle=g;
+  ctx.beginPath(); ctx.arc(0,-70,45,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(-35,-45,32,0,Math.PI*2); ctx.fill();
+  ctx.beginPath(); ctx.arc(35,-45,32,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function drawBigFlower(x,y,scale,hue){
+  const colors = {pink:['#ff9ecb','#ff5fa2'], purple:['#c79bff','#8b5cf6'], yellow:['#fff08a','#ffcc33']};
+  const c = colors[hue]||colors.pink;
+  ctx.save();
+  ctx.translate(x,y); ctx.scale(scale,scale);
+  ctx.fillStyle='#4a9c3f';
+  ctx.fillRect(-5,-60,10,60);
+  for(let i=0;i<6;i++){
+    const a = (i/6)*Math.PI*2;
+    ctx.save();
+    ctx.translate(0,-70);
+    ctx.rotate(a);
+    ctx.fillStyle=c[0];
+    ctx.beginPath();
+    ctx.ellipse(0,-18,13,20,0,0,Math.PI*2);
+    ctx.fill();
+    ctx.restore();
+  }
+  ctx.fillStyle=c[1];
+  ctx.beginPath(); ctx.arc(0,-70,13,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#fff6c2';
+  ctx.beginPath(); ctx.arc(0,-70,6,0,Math.PI*2); ctx.fill();
+  ctx.restore();
+}
+function drawCrystalShape(x,y,size,color){
+  ctx.save();
+  ctx.translate(x,y);
+  const grd = ctx.createLinearGradient(-size*0.3,-size,size*0.3,0);
+  grd.addColorStop(0, color||'#c4b5fd');
+  grd.addColorStop(1, '#5b21b6');
+  ctx.fillStyle = grd;
+  ctx.beginPath();
+  ctx.moveTo(0,-size);
+  ctx.lineTo(size*0.45,-size*0.25);
+  ctx.lineTo(size*0.3,0);
+  ctx.lineTo(-size*0.3,0);
+  ctx.lineTo(-size*0.45,-size*0.25);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle='rgba(255,255,255,0.4)';
+  ctx.lineWidth=1.5;
+  ctx.stroke();
+  ctx.restore();
+}
+function drawRainbow(x,baseY){
+  const colors=['#ff5f7e','#ffb347','#ffe066','#7ee85e','#5fc9ff','#a78bfa'];
+  ctx.save();
+  ctx.translate(x,baseY);
+  for(let i=0;i<colors.length;i++){
+    ctx.strokeStyle=colors[i];
+    ctx.lineWidth=10;
+    ctx.beginPath();
+    ctx.arc(0,0,240-i*11,Math.PI,Math.PI*2);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ---------- отрисовка платформ по типу ----------
+function drawPlatform(p, camX, t){
+  const x = p.x - camX;
+  let yOff = 0;
+  if(p.bob) yOff = Math.sin(t*0.03 + p.x*0.01)*8;
+  const y = p.y + yOff;
+
+  if(p.type==='leaf'){
+    ctx.save();
+    ctx.fillStyle='#4fae3c';
+    ctx.beginPath();
+    ctx.ellipse(x+p.w/2, y+p.h/2, p.w/2, p.h/2, 0,0,Math.PI*2);
+    ctx.fill();
+    ctx.strokeStyle='#2f7a25'; ctx.lineWidth=3;
+    ctx.beginPath();
+    ctx.moveTo(x+6,y+p.h/2); ctx.lineTo(x+p.w-6,y+p.h/2);
+    ctx.stroke();
+    ctx.fillStyle='#7ee85e';
+    ctx.beginPath(); ctx.ellipse(x+p.w/2, y+p.h/2-3, p.w/2-6, p.h/2-5,0,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  } else if(p.type==='crystal'){
+    ctx.save();
+    ctx.shadowColor='#a78bfa'; ctx.shadowBlur=18;
+    const grd = ctx.createLinearGradient(x,y,x,y+p.h);
+    grd.addColorStop(0,'#c4b5fd'); grd.addColorStop(1,'#6d28d9');
+    ctx.fillStyle=grd;
+    ctx.beginPath();
+    ctx.moveTo(x+10,y);
+    ctx.lineTo(x+p.w-10,y);
+    ctx.lineTo(x+p.w,y+p.h);
+    ctx.lineTo(x,y+p.h);
+    ctx.closePath(); ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.55)'; ctx.lineWidth=2; ctx.stroke();
+    ctx.restore();
+  } else if(p.type==='crystalGround'){
+    ctx.save();
+    ctx.shadowColor='#8b5cf6'; ctx.shadowBlur=22;
+    const grd = ctx.createLinearGradient(x,y,x,y+p.h);
+    grd.addColorStop(0,'#a78bfa'); grd.addColorStop(1,'#4c1d95');
+    ctx.fillStyle=grd;
+    ctx.fillRect(x,y,p.w,p.h);
+    ctx.restore();
+  } else if(p.type==='chandelier'){
+    ctx.save();
+    const cx=x+p.w/2, cy=y+p.h/2;
+    // цепь до верха экрана
+    ctx.strokeStyle='rgba(251,191,36,0.5)'; ctx.lineWidth=2;
+    ctx.beginPath(); ctx.moveTo(cx,-20); ctx.lineTo(cx,y); ctx.stroke();
+    ctx.shadowColor='#fde68a'; ctx.shadowBlur=20;
+    const grd = ctx.createLinearGradient(x,y,x,y+p.h);
+    grd.addColorStop(0,'#fef3c7'); grd.addColorStop(1,'#d97706');
+    ctx.fillStyle=grd;
+    roundRectPath(x,y,p.w,p.h,12);
+    ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.6)'; ctx.lineWidth=2; ctx.stroke();
+    // маленькие свечи
+    for(let i=0;i<3;i++){
+      const fx = x+p.w*(0.2+i*0.3);
+      ctx.fillStyle='#fff7cc';
+      ctx.beginPath(); ctx.arc(fx,y-6,4,0,Math.PI*2); ctx.fill();
+    }
+    ctx.restore();
+  } else if(p.type==='cloud' || p.type==='cloudGround'){
+    ctx.save();
+    ctx.shadowColor='rgba(255,255,255,0.6)'; ctx.shadowBlur=10;
+    ctx.fillStyle='#ffffff';
+    const cx=x+p.w/2, cy=y+p.h/2, r=p.h/2+4;
+    ctx.beginPath();
+    ctx.arc(cx-p.w*0.3, cy, r*0.9, 0, Math.PI*2);
+    ctx.arc(cx, cy-4, r, 0, Math.PI*2);
+    ctx.arc(cx+p.w*0.3, cy, r*0.9, 0, Math.PI*2);
+    ctx.arc(cx-p.w*0.12, cy+3, r*0.85,0,Math.PI*2);
+    ctx.arc(cx+p.w*0.12, cy+3, r*0.85,0,Math.PI*2);
+    ctx.fill();
+    ctx.fillStyle='rgba(255,190,210,0.5)';
+    ctx.beginPath(); ctx.ellipse(cx,cy+r*0.5,p.w*0.4,r*0.4,0,0,Math.PI*2); ctx.fill();
+    ctx.restore();
+  }
+  return y;
+}
+
+// ============================================================
+// ФИЗИКА
+// ============================================================
+const GRAV = 0.44;
+const MAX_FALL = 14;
+const MOVE_SPEED = 5;
+const JUMP_VEL = -14.6;
+const FRICTION = 0.82;
+const ACCEL = 1.15;
+const COYOTE_FRAMES = 8;   // можно прыгнуть чуть после схода с края
+const BUFFER_FRAMES = 8;   // прыжок засчитается, если нажать чуть раньше приземления
+
+let camX = 0;
+let coyoteTimer = 0;
+let jumpBufferTimer = 0;
+
+function updatePlaying(dt){
+  const lv = levels[currentLevelIndex];
+
+  // ---- ввод ----
+  let left = keys['ArrowLeft'], right = keys['ArrowRight'];
+  player.rolling = !!keys['ArrowDown'] && player.onGround;
+
+  if(left && !right){ player.vx -= ACCEL; player.facing=-1; }
+  else if(right && !left){ player.vx += ACCEL; player.facing=1; }
+  else { player.vx *= FRICTION; if(Math.abs(player.vx)<0.05) player.vx=0; }
+
+  const maxSpeed = player.rolling ? MOVE_SPEED*1.5 : MOVE_SPEED;
+  player.vx = Math.max(-maxSpeed, Math.min(maxSpeed, player.vx));
+
+  if(keys['Space']) jumpBufferTimer = BUFFER_FRAMES;
+  else jumpBufferTimer = Math.max(0, jumpBufferTimer-1);
+
+  const canJump = player.onGround || coyoteTimer>0;
+  if(jumpBufferTimer>0 && canJump){
+    player.vy = JUMP_VEL;
+    player.onGround = false;
+    coyoteTimer = 0;
+    jumpBufferTimer = 0;
+    for(let i=0;i<10;i++){
+      spawnParticle({x:player.x+player.w/2, y:player.y+player.h, vx:(Math.random()-0.5)*2, vy:Math.random()*1,
+        r:2+Math.random()*2, life:30, maxLife:30, color:'rgba(255,255,255,0.8)'});
+    }
+  }
+
+  player.vy += GRAV;
+  if(player.vy>MAX_FALL) player.vy=MAX_FALL;
+
+  player.x += player.vx;
+  player.y += player.vy;
+  player.animT += 1 + Math.abs(player.vx)*0.4;
+
+  player.x = Math.max(0, Math.min(lv.width-player.w, player.x));
+
+  // ---- коллизии с землёй (уровень 1) ----
+  const wasOnGround = player.onGround;
+  player.onGround = false;
+  if(lv.groundFn){
+    const gy = lv.groundFn(player.x+player.w/2);
+    if(player.y+player.h >= gy && player.vy>=0){
+      player.y = gy-player.h;
+      player.vy = 0;
+      player.onGround = true;
+      player.checkpointX = player.x; player.checkpointY = player.y;
+    }
+  }
+
+  // ---- коллизии с платформами ----
+  for(const p of lv.platforms){
+    let py = p.y;
+    if(p.bobActive) py = p.y + Math.sin(time*0.03+p.x*0.01)*8;
+    const footY = player.y+player.h;
+    const prevFootY = footY - player.vy;
+    if(player.x+player.w*0.88 > p.x && player.x+player.w*0.12 < p.x+p.w){
+      if(player.vy>=0 && prevFootY <= py+12 && footY >= py){
+        player.y = py - player.h;
+        player.vy = 0;
+        player.onGround = true;
+        player.checkpointX = player.x; player.checkpointY = player.y;
+      }
+    }
+  }
+
+  if(player.onGround) coyoteTimer = COYOTE_FRAMES;
+  else if(wasOnGround) coyoteTimer = COYOTE_FRAMES; // только что сошёл с края
+  else coyoteTimer = Math.max(0, coyoteTimer-1);
+
+  // ---- падение в пропасть (уровни-острова) ----
+  if(player.y > H+90){
+    player.x = player.checkpointX;
+    player.y = player.checkpointY - 40;
+    player.vy = 0; player.vx=0;
+  }
+
+  // ---- сбор колец ----
+  for(const r of lv.rings){
+    if(!r.collected){
+      const dx = (r.x)-(player.x+player.w/2);
+      const dy = (r.y)-(player.y+player.h/2);
+      if(Math.sqrt(dx*dx+dy*dy) < 30){
+        r.collected = true;
+        player.rings++;
+        for(let i=0;i<12;i++){
+          spawnParticle({x:r.x,y:r.y, vx:(Math.random()-0.5)*3, vy:(Math.random()-0.5)*3-1,
+            r:1.5+Math.random()*2, life:35, maxLife:35, color:'rgba(255,210,63,0.95)', grav:true});
+        }
+      }
+    }
+  }
+
+  // ---- финиш ----
+  if(player.x+player.w/2 > lv.goalX){
+    state='complete';
+  }
+
+  // ---- камера ----
+  camX = Math.max(0, Math.min(lv.width-W, player.x - W/2));
+
+  lv.ambient && lv.ambient(dt);
+  updateParticles(dt);
+  time++;
+}
+
+// ============================================================
+// ОТРИСОВКА
+// ============================================================
+function drawGoal(lv, camX){
+  const x = lv.goalX - camX;
+  const baseY = lv.groundFn ? lv.groundFn(lv.goalX) : 460;
+  ctx.save();
+  ctx.strokeStyle='#c9a24a'; ctx.lineWidth=8;
+  ctx.beginPath(); ctx.moveTo(x, baseY); ctx.lineTo(x, baseY-220); ctx.stroke();
+  const glow = 0.6+Math.sin(time*0.06)*0.4;
+  ctx.save();
+  ctx.translate(x, baseY-190);
+  ctx.rotate(time*0.02);
+  ctx.shadowColor='#ffe066'; ctx.shadowBlur=25+glow*15;
+  ctx.strokeStyle='#ffd23f'; ctx.lineWidth=10;
+  ctx.beginPath(); ctx.arc(0,0,42,0,Math.PI*2); ctx.stroke();
+  ctx.strokeStyle='#fff6d0'; ctx.lineWidth=3;
+  ctx.beginPath(); ctx.arc(0,0,42,0,Math.PI*2); ctx.stroke();
+  ctx.restore();
+  ctx.restore();
+}
+
+function drawHUD(lv){
+  ctx.save();
+  // панель колец
+  roundRectPath(14,14,140,44,14);
+  ctx.fillStyle='rgba(20,10,40,0.55)';
+  ctx.fill();
+  ctx.save();
+  ctx.translate(38,36);
+  ctx.strokeStyle='#ffd23f'; ctx.lineWidth=5;
+  ctx.shadowColor='#ffe066'; ctx.shadowBlur=10;
+  ctx.beginPath(); ctx.arc(0,0,10,0,Math.PI*2); ctx.stroke();
+  ctx.restore();
+  ctx.fillStyle='#fff';
+  ctx.font='700 20px "Baloo 2", sans-serif';
+  ctx.fillText(player.rings, 60, 43);
+
+  // кнопка меню
+  const menuBtn = {x:W-108,y:14,w:94,h:38};
+  roundRectPath(menuBtn.x,menuBtn.y,menuBtn.w,menuBtn.h,12);
+  ctx.fillStyle = pointInRect(mouse.x,mouse.y,menuBtn) ? 'rgba(255,255,255,0.35)':'rgba(20,10,40,0.55)';
+  ctx.fill();
+  ctx.fillStyle='#fff';
+  ctx.font='600 15px "Fredoka", sans-serif';
+  ctx.textAlign='center';
+  ctx.fillText('☰ Меню', menuBtn.x+menuBtn.w/2, menuBtn.y+25);
+  ctx.textAlign='left';
+  window.__menuBtn = menuBtn;
+
+  // название уровня
+  ctx.font='700 20px "Baloo 2", sans-serif';
+  ctx.textAlign='center';
+  ctx.fillStyle='rgba(255,255,255,0.9)';
+  ctx.shadowColor='rgba(0,0,0,0.4)'; ctx.shadowBlur=6;
+  ctx.fillText(lv.name, W/2, 34);
+  ctx.textAlign='left';
+  ctx.restore();
+}
+
+function roundRectPath(x,y,w,h,r){
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y,x+w,y+h,r);
+  ctx.arcTo(x+w,y+h,x,y+h,r);
+  ctx.arcTo(x,y+h,x,y,r);
+  ctx.arcTo(x,y,x+w,y,r);
+  ctx.closePath();
+}
+
+function renderPlaying(){
+  const lv = levels[currentLevelIndex];
+  lv.drawBackground(camX);
+
+  // дальний декор (за платформами)
+  for(const d of lv.decorations){
+    if(d.type==='softCloud'||d.type==='rainbow'||d.type==='bigCrystal'||d.type==='tower'||d.type==='window') lv.drawForeDecor(camX,d);
+  }
+
+  drawParticles(camX);
+
+  if(lv.groundFn) lv.drawGround(camX);
+
+  // деревья/цветы перед землёй
+  for(const d of lv.decorations){
+    if(d.type==='tree'||d.type==='flower'||d.type==='banner') lv.drawForeDecor(camX,d);
+  }
+
+  // платформы (с покачиванием для облаков)
+  for(const p of lv.platforms){
+    p.bobActive = !!lv.bobbing;
+    drawPlatform(p, camX, time);
+  }
+
+  // кольца
+  for(const r of lv.rings) drawRing(r.x, r.y, camX, time, r.collected);
+
+  drawGoal(lv, camX);
+
+  drawSonic(player.x-camX, player.y, player.w, player.h, player.facing, player.rolling, player.animT, player.onGround, player.vx);
+
+  drawHUD(lv);
+}
+
+// ============================================================
+// СТАРТОВЫЙ ЭКРАН
+// ============================================================
+let startBtns = [];
+function renderStart(){
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,'#2b2560'); g.addColorStop(1,'#0f0c2e');
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+
+  for(let i=0;i<30;i++){
+    const sx=(i*97+ (time*0.15))%W;
+    const sy=(i*53)%(H*0.5);
+    ctx.fillStyle='rgba(255,255,255,'+(0.2+0.3*Math.abs(Math.sin(i+time*0.02)))+')';
+    ctx.beginPath(); ctx.arc(sx,sy,1.4,0,Math.PI*2); ctx.fill();
+  }
+
+  // логотип "волшебное кольцо"
+  ctx.save();
+  ctx.translate(W/2, 108);
+  ctx.rotate(time*0.01);
+  ctx.shadowColor='#ffe066'; ctx.shadowBlur=35;
+  ctx.strokeStyle='#ffd23f'; ctx.lineWidth=12;
+  ctx.beginPath(); ctx.arc(0,0,48,0,Math.PI*2); ctx.stroke();
+  ctx.strokeStyle='#fff6d0'; ctx.lineWidth=4;
+  ctx.beginPath(); ctx.arc(0,0,48,0,Math.PI*2); ctx.stroke();
+  ctx.restore();
+
+  ctx.textAlign='center';
+  ctx.fillStyle='#fff';
+  ctx.font='800 40px "Baloo 2", sans-serif';
+  ctx.shadowColor='rgba(120,90,255,0.7)'; ctx.shadowBlur=18;
+  ctx.fillText('SONIC', W/2, 200);
+  ctx.font='700 24px "Baloo 2", sans-serif';
+  ctx.fillStyle='#ffd23f';
+  ctx.shadowBlur=8;
+  ctx.fillText('Приключения в Волшебном Кольце', W/2, 232);
+  ctx.shadowBlur=0;
+  ctx.textAlign='left';
+
+  // карточки уровней
+  startBtns = [];
+  let cardW=270, cardH=190, gap=28;
+  let totalW = cardW*levels.length + gap*(levels.length-1);
+  const maxRowWidth = 900;
+  if(totalW > maxRowWidth){
+    const s = maxRowWidth/totalW;
+    cardW*=s; cardH*=s; gap*=s;
+    totalW = cardW*levels.length + gap*(levels.length-1);
+  }
+  const startX = W/2-totalW/2;
+  const y = 280;
+  levels.forEach((lv,i)=>{
+    const x = startX + i*(cardW+gap);
+    const rc = {x,y,w:cardW,h:cardH};
+    startBtns.push(rc);
+    const hover = pointInRect(mouse.x,mouse.y,rc);
+    ctx.save();
+    if(hover){ ctx.translate(x+cardW/2,y+cardH/2); ctx.scale(1.03,1.03); ctx.translate(-(x+cardW/2),-(y+cardH/2)); }
+    roundRectPath(x,y,cardW,cardH,20);
+    const cg = ctx.createLinearGradient(x,y,x,y+cardH);
+    cg.addColorStop(0,lv.cardBg[0]); cg.addColorStop(1,lv.cardBg[1]);
+    ctx.fillStyle=cg; ctx.fill();
+    ctx.strokeStyle= hover? 'rgba(255,255,255,0.9)':'rgba(255,255,255,0.25)';
+    ctx.lineWidth= hover?3:2; ctx.stroke();
+
+    // мини-иконка мира
+    ctx.save();
+    ctx.translate(x+cardW/2, y+70);
+    if(i===0){
+      ctx.fillStyle='#ffe066'; ctx.beginPath(); ctx.arc(-40,-30,16,0,Math.PI*2); ctx.fill();
+      ctx.fillStyle='#3fae3f'; ctx.beginPath(); ctx.arc(0,20,60,Math.PI,Math.PI*2); ctx.fill();
+    } else if(i===1){
+      drawCrystalShape(-20,10,40,'#e9d5ff');
+      drawCrystalShape(20,20,30,'#c4b5fd');
+    } else if(i===2){
+      drawCloud(-10,0,1.1,'rgba(255,255,255,0.95)');
+      ctx.fillStyle='#fff3cf'; ctx.beginPath(); ctx.arc(35,-10,20,0,Math.PI*2); ctx.fill();
+    } else {
+      ctx.fillStyle='#e0e7ff';
+      ctx.fillRect(-14,-10,28,50);
+      ctx.fillStyle='#fbbf24';
+      ctx.beginPath(); ctx.moveTo(-16,-10); ctx.lineTo(0,-38); ctx.lineTo(16,-10); ctx.closePath(); ctx.fill();
+      ctx.fillStyle='rgba(96,165,250,0.8)';
+      ctx.beginPath(); ctx.arc(0,10,6,0,Math.PI*2); ctx.fill();
+      for(let k=0;k<40;k++){
+        const stx=-90+ (k*53)%180, sty=-40+(k*29)%70;
+        ctx.fillStyle='rgba(255,255,255,'+(0.3+0.3*Math.sin(k))+')';
+        ctx.beginPath(); ctx.arc(stx,sty,1,0,Math.PI*2); ctx.fill();
+      }
+    }
+    ctx.restore();
+
+    ctx.textAlign='center';
+    ctx.fillStyle='#fff';
+    ctx.font='700 22px "Baloo 2", sans-serif';
+    ctx.fillText(lv.name, x+cardW/2, y+cardH-46);
+    ctx.font='500 14px "Fredoka", sans-serif';
+    ctx.fillStyle='rgba(255,255,255,0.85)';
+    ctx.fillText(lv.subtitle, x+cardW/2, y+cardH-24);
+    ctx.textAlign='left';
+    ctx.restore();
+  });
+}
+
+// ============================================================
+// ЭКРАН ЗАВЕРШЕНИЯ УРОВНЯ
+// ============================================================
+let completeBtns = {};
+function renderComplete(){
+  const lv = levels[currentLevelIndex];
+  const g = ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,lv.cardBg[0]); g.addColorStop(1,lv.cardBg[1]);
+  ctx.fillStyle=g; ctx.fillRect(0,0,W,H);
+
+  for(let i=0;i<25;i++){
+    const a = time*0.02+i;
+    const sx = W/2 + Math.cos(a)*(150+i*6);
+    const sy = 260 + Math.sin(a*1.3)*140;
+    ctx.fillStyle='rgba(255,255,255,0.5)';
+    ctx.beginPath(); ctx.arc(sx,sy,3,0,Math.PI*2); ctx.fill();
+  }
+
+  ctx.textAlign='center';
+  ctx.fillStyle='#fff';
+  ctx.font='800 38px "Baloo 2", sans-serif';
+  ctx.shadowColor='rgba(0,0,0,0.3)'; ctx.shadowBlur=10;
+  ctx.fillText('Уровень пройден!', W/2, 150);
+  ctx.shadowBlur=0;
+
+  ctx.font='600 20px "Fredoka", sans-serif';
+  ctx.fillText(lv.name, W/2, 185);
+
+  // звёзды по кол-ву колец
+  const total = lv.rings.length;
+  const pct = player.rings/total;
+  const stars = pct>=0.9?3: pct>=0.5?2:1;
+  for(let i=0;i<3;i++){
+    const sx = W/2 + (i-1)*70;
+    drawStar(sx,240,30, i<stars ? '#ffd23f' : 'rgba(255,255,255,0.3)');
+  }
+
+  ctx.font='500 18px "Fredoka", sans-serif';
+  ctx.fillText('Колец собрано: '+player.rings+' / '+total, W/2, 300);
+
+  const btnW=200,btnH=52;
+  const b1 = {x:W/2-btnW-14, y:350, w:btnW, h:btnH};
+  const b2 = {x:W/2+14, y:350, w:btnW, h:btnH};
+  completeBtns = {retry:b1, menu:b2};
+
+  drawBtn(b1,'Играть снова', pointInRect(mouse.x,mouse.y,b1));
+  drawBtn(b2,'В меню', pointInRect(mouse.x,mouse.y,b2));
+  ctx.textAlign='left';
+}
+
+function drawBtn(rc,label,hover){
+  roundRectPath(rc.x,rc.y,rc.w,rc.h,16);
+  ctx.fillStyle = hover?'rgba(255,255,255,0.95)':'rgba(255,255,255,0.75)';
+  ctx.fill();
+  ctx.fillStyle='#3b2560';
+  ctx.font='700 18px "Baloo 2", sans-serif';
+  ctx.textAlign='center';
+  ctx.fillText(label, rc.x+rc.w/2, rc.y+rc.h/2+6);
+}
+
+function drawStar(cx,cy,r,color){
+  ctx.save();
+  ctx.translate(cx,cy);
+  ctx.fillStyle=color;
+  ctx.shadowColor=color; ctx.shadowBlur = color==='#ffd23f'?18:0;
+  ctx.beginPath();
+  for(let i=0;i<5;i++){
+    const a1 = -Math.PI/2 + i*(Math.PI*2/5);
+    const a2 = a1 + Math.PI/5;
+    ctx.lineTo(Math.cos(a1)*r, Math.sin(a1)*r);
+    ctx.lineTo(Math.cos(a2)*r*0.42, Math.sin(a2)*r*0.42);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+
+// ============================================================
+// ГЛАВНЫЙ ЦИКЛ
+// ============================================================
+function handleClicks(){
+  if(!mouse.clicked) return;
+  if(state==='start'){
+    startBtns.forEach((rc,i)=>{
+      if(pointInRect(mouse.x,mouse.y,rc)){
+        currentLevelIndex=i;
+        resetPlayer(levels[i]);
+        state='playing';
+      }
+    });
+  } else if(state==='playing'){
+    if(window.__menuBtn && pointInRect(mouse.x,mouse.y,window.__menuBtn)){
+      state='start';
+    }
+  } else if(state==='complete'){
+    if(pointInRect(mouse.x,mouse.y,completeBtns.retry)){
+      resetPlayer(levels[currentLevelIndex]);
+      state='playing';
+    } else if(pointInRect(mouse.x,mouse.y,completeBtns.menu)){
+      state='start';
+    }
+  }
+  mouse.clicked=false;
+}
+
+function loop(){
+  handleClicks();
+  ctx.clearRect(0,0,W,H);
+  if(state==='start') renderStart();
+  else if(state==='playing'){ updatePlaying(1); renderPlaying(); }
+  else if(state==='complete') renderComplete();
+  time++;
+  requestAnimationFrame(loop);
+}
+loop();
+
+})();
+</script>
+</body>
+</html>
